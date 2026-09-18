@@ -1,0 +1,58 @@
+# Compose template for the Ollama stack.
+#
+# A dedicated bridge network with an EXPLICIT subnet is declared. Relying on
+# Docker/Compose automatic subnet selection is unsafe: auto subnets have been
+# seen colliding with host VPN / private LAN / remote-server ranges, which
+# installs host-level routes that shadow real traffic and break SSH. The
+# subnet is validated (against host routes + existing networks) before the
+# stack is created, so a collision fails fast with an explicit error instead
+# of silently poisoning host routing.
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: {{ .Name }}-ollama
+    restart: always
+    # Cap the log on disk. Docker's json-file driver never rotates by default, so
+    # a container left running would grow its log until the host disk fills.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+{{- if .GPUEnabled }}
+    gpus: all
+{{- end }}
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    ports:
+      - "{{ .ListenHost }}:{{ .OllamaPort }}:11434"
+    networks:
+      - stable_llm
+    volumes:
+      - "{{ .DataDir }}:/root/.ollama"
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_CONTEXT_LENGTH={{ .ContextLength }}
+      - OLLAMA_GPU_MEMORY_FRACTION={{ .GPUMemoryFraction }}
+      - OLLAMA_NUM_PARALLEL={{ .NumParallel }}
+      - OLLAMA_KEEP_ALIVE={{ .KeepAlive }}
+      - OLLAMA_FLASH_ATTENTION={{ .FlashAttention }}
+      - OLLAMA_MAX_QUEUE={{ .MaxQueue }}
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  stable_llm:
+    name: {{ .Name }}-llm
+    driver: bridge
+{{- if .NetworkSubnet }}
+    ipam:
+      driver: default
+      config:
+        - subnet: {{ .NetworkSubnet }}
+{{- end }}

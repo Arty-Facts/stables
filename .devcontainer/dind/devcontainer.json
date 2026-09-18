@@ -1,0 +1,16 @@
+{
+  "name": "stable-oss-dind",
+  "image": "mcr.microsoft.com/devcontainers/go:1-1.23-bookworm",
+  "privileged": true,
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "moby": true,
+      "dockerDashComposeVersion": "v2"
+    }
+  },
+  "runArgs": [
+    "--cgroupns=host"
+  ],
+  "postCreateCommand": "go version && docker version && docker compose version && make test"
+}

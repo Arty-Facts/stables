@@ -1,0 +1,27 @@
+# Runtime dependencies for the voice backend (see Dockerfile).
+#
+# TTS only. The speech-to-text half of the original project is gone: no
+# nemo_toolkit, faster-whisper, silero-vad, or VAD streaming.
+#
+# torch and torchaudio are needed by the phase-vocoder time stretch in
+# tts_engine.py. Listed bare on purpose: a plain CPU install gets the default
+# PyPI wheels, while the Dockerfile strips these two lines and installs the CUDA
+# build from the PyTorch index first (a versioned line here would let a CPU
+# wheel land on top of it).
+
+torch
+torchaudio
+
+fastapi>=0.68.0
+uvicorn[standard]>=0.15.0
+pydantic>=1.8.0
+psutil>=5.8.0
+numpy>=1.20.0
+soundfile>=0.12.0
+scipy>=1.10.0
+langdetect>=1.0.9
+
+# Engines: Kokoro ONNX is the always-available engine, Piper supplies the
+# per-language voices. Qwen3-TTS is installed separately when it is added.
+kokoro-onnx
+piper-tts>=1.2.0

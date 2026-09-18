@@ -1,0 +1,5 @@
+# Compiled CLI binary. Anchored so it doesn't also match the cmd/stab source dir.
+/stab
+
+# Seeded per-project runtime state (created by `stab .`); never committed.
+/.stables/

@@ -1,0 +1,39 @@
+[package]
+name = "ratts-cli"
+version = "0.2.0"
+edition = "2021"
+description = "ratts Ratatui TUI client"
+
+[[bin]]
+name = "ratts-cli"
+path = "src/main.rs"
+
+[lib]
+name = "ratts_lib"
+path = "src/lib.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["stream", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+cpal = "0.15"
+arboard = "3"
+base64 = "0.22"
+hound = "3"
+dirs = "5"
+anyhow = "1"
+bytes = "1"
+futures-util = "0.3"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockito = "1"
+tempfile = "3"
+
+[profile.test]
+opt-level = 0
+debug = true

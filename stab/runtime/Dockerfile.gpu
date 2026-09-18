@@ -1,0 +1,56 @@
+# GPU runtime image: the same code-server + pi + tmux workspace as the CPU
+# image, plus the NVIDIA CUDA toolkit (nvcc + runtime) so GPU work is available
+# by default. The NVIDIA driver and nvidia-smi are injected at runtime via
+# `--gpus all` (auto-enabled on hosts where nvidia-smi is present).
+FROM codercom/code-server
+
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bash curl ca-certificates git openssh-client ripgrep fd-find gosu tmux gettext-base sudo \
+  && (apt-get install -y --no-install-recommends docker-cli docker-compose \
+    || apt-get install -y --no-install-recommends docker.io docker-compose) \
+  && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+  && rm -rf /var/lib/apt/lists/* \
+  && echo "coder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/coder \
+  && chmod 0440 /etc/sudoers.d/coder
+
+# NVIDIA CUDA toolkit via NVIDIA's Debian apt repo (the code-server base image
+# is Debian). `trusted=yes` skips GPG verification; the repo is HTTPS. The repo
+# is a CDN that is occasionally mid-sync (mismatched Packages.gz size), so
+# retry apt-get update a few times before giving up.
+RUN echo "deb [trusted=yes] https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/ /" > /etc/apt/sources.list.d/cuda.list \
+  && (i=0; until apt-get update; do i=$((i+1)); [ "$i" -ge 5 ] && exit 1; echo "cuda repo sync in progress, retrying ($i/5)"; sleep 10; done) \
+  && apt-get install -y --no-install-recommends cuda-runtime-13-3 cuda-nvcc-13-3 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 24.x LTS (required by the pi installer).
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+  && apt-get install -y --no-install-recommends nodejs \
+  && rm -rf /var/lib/apt/lists/* \
+  && npm install -g npm@latest
+
+# Install the pi coding agent globally.
+RUN curl -fsSL https://pi.dev/install.sh | sh
+
+# Pi requires a resolved API key value for Ollama-compatible local providers.
+ENV OLLAMA=ollama
+
+# Pi's agent dir must exist and be owned by coder in the image: the controller
+# bind-mounts skills/extensions/settings.json beneath it, and Docker would
+# otherwise create the parent as root — leaving Pi (which runs as coder) unable
+# to create its settings.json.lock lockdir and auth.json.
+RUN mkdir -p /home/coder/.pi/agent \
+  && chown -R coder:coder /home/coder/.pi
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# Windows checkouts may copy this file with CRLF endings.
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
+  && chmod +x /usr/local/bin/entrypoint.sh
+
+RUN mkdir -p /workspace /stab-state /var/log/stab
+WORKDIR /workspace
+
+# Stay as root — entrypoint will drop to coder after aligning uid/gid.
+ENTRYPOINT ["dumb-init", "--", "/usr/local/bin/entrypoint.sh"]
+CMD ["--bind-addr", "0.0.0.0:8080", "/workspace"]

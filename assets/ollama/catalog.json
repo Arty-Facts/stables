@@ -1,0 +1,16 @@
+{
+  "defaults": [
+    "nomic-embed-text",
+    "qwen3:8b"
+  ],
+  "recommended": [
+    {"name": "nomic-embed-text", "role": "embedding"},
+    {"name": "qwen3:8b", "role": "fast"},
+    {"name": "qwen3:14b", "role": "balanced"}
+  ],
+  "large": [
+    "qwen3.8:27b",
+    "gpt-oss:20b",
+    "gpt-oss:120b"
+  ]
+}

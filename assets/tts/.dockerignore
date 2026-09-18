@@ -1,0 +1,8 @@
+# The weights are mounted at runtime, so they have no business in the build
+# context: without this, every build sends ~460 MB to the daemon and then throws
+# it away.
+models/
+# Build output and caches that would only slow the context down.
+**/__pycache__/
+**/*.pyc
+tests/

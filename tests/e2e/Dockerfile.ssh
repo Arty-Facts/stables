@@ -1,0 +1,28 @@
+# Minimal SSH + Docker CLI test container for Stable OSS E2E tests.
+# Used as both the "remote server" (sshd + docker CLI + host socket) and the
+# "client host" (ssh client + stables binary).
+FROM debian:13
+
+ARG TESTER_UID=1001
+ARG DOCKER_GID=984
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    openssh-server openssh-client ca-certificates curl git sudo rsync iproute2 \
+  && (apt-get install -y --no-install-recommends docker-cli docker-compose \
+    || apt-get install -y --no-install-recommends docker.io docker-compose) \
+  && rm -rf /var/lib/apt/lists/* \
+  && usermod -u ${TESTER_UID} tester 2>/dev/null || useradd -m -u ${TESTER_UID} -s /bin/bash tester \
+  && groupadd -f -g ${DOCKER_GID} dockerhost \
+  && usermod -aG dockerhost tester \
+  && echo "tester ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/tester \
+  && chmod 0440 /etc/sudoers.d/tester \
+  && mkdir -p /run/sshd /home/tester/.ssh \
+  && chown -R tester:tester /home/tester/.ssh \
+  && chmod 700 /home/tester/.ssh
+
+COPY e2e-entry.sh /usr/local/bin/e2e-entry.sh
+RUN chmod +x /usr/local/bin/e2e-entry.sh
+
+USER tester
+ENTRYPOINT ["/usr/local/bin/e2e-entry.sh"]

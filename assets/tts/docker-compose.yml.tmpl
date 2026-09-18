@@ -1,0 +1,78 @@
+# An explicit project name, not the directory name. Compose derives the project
+# from the directory otherwise, and this installs into ~/.stables/tts — which
+# collides with any other compose project called "tts" on the same daemon
+# (a checkout in ~/tts, for instance). The names it drives are the network
+# (stables-tts_default) and the image tag below, so a collision is not cosmetic:
+# Compose would treat the other project's containers as orphans of this one.
+name: {{ .Name }}-tts
+
+services:
+  tts:
+    # Tagged explicitly for the same reason: the default would be <project>-<service>.
+    image: {{ .Name }}-tts:local
+    # Built from the source baked into the stables binary and written out by
+    # `stables install tts`, because there is no published image for it.
+    # The context is the compose file's own directory, which holds backend/.
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        # Decided by the installer from the host. Without this the CPU and GPU
+        # images would share a cache key and a CPU host could be handed CUDA
+        # wheels it cannot use.
+        USE_GPU: "{{ if .GPUEnabled }}1{{ else }}0{{ end }}"
+        # Adds the cloning engine to the image. Set by --preload, since there is
+        # no point fetching weights for an engine that is not installed.
+        WITH_QWEN: "{{ if .QwenEnabled }}1{{ else }}0{{ end }}"
+    container_name: {{ .Name }}-tts
+    restart: unless-stopped
+    ports:
+      # Loopback by default: the API is unauthenticated and a cloned voice is
+      # biometric data. --listen 0.0.0.0 is available and warned about.
+      - "{{ .ListenHost }}:{{ .Port }}:17493"
+    volumes:
+      # Weights live on the host, not in the image, so rebuilding the image or
+      # removing the container never re-downloads them. Read-only: the backend
+      # only ever reads them, and a bind source that resolves to an empty
+      # directory is caught by the installer, which fails when no voices load.
+      - {{ .ModelsDir }}:/app/models:ro
+      - {{ .VoicesDir }}:/data/voices
+      - {{ .HFCacheDir }}:/data/hf
+    environment:
+      # Read-only mount, so this is where cloned voices live instead. The
+      # Hugging Face cache is pinned so a container recreate does not re-download
+      # several gigabytes of Qwen weights.
+      STABLES_VOICES_DIR: /data/voices
+      HF_HOME: /data/hf
+      # Named rather than left to the image's default, so a wrong mount is a
+      # missing directory rather than a silently different one.
+      STABLES_VOICE_MODELS: /app/models
+      # Set explicitly rather than relying on the image's env: the engine
+      # reports itself unavailable when the package is missing, and this makes
+      # which state the image is in obvious from `docker inspect`.
+      STABLES_QWEN_ENABLED: "{{ .QwenEnabled }}"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:17493/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Cap the log on disk. Docker's json-file driver never rotates by default, so
+    # a container left running would grow its log until the host disk fills.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+{{- if .GPUEnabled }}
+    # Explicit device reservation, never the short-form GPU key: Compose
+    # 2.26.1 drops that silently, leaving the container on CPU while appearing
+    # to have a GPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+{{- end }}

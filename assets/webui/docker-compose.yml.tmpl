@@ -1,0 +1,50 @@
+# Open WebUI pointed at an Ollama endpoint. Because `stables tunnel` makes a
+# remote Ollama look like the local port, WebUI defaults to host.docker.internal
+# and automatically follows whatever tunnel is active.
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: {{ .Name }}-open-webui
+    restart: unless-stopped
+    # Cap the log on disk. Docker's json-file driver never rotates by default, so
+    # a container left running would grow its log until the host disk fills.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      # Open WebUI serves on 8080 by default, which collides conceptually with
+      # code-server in the stab runtime. Pin it to 3000 so the whole webui stack
+      # is unambiguously "localhost:3000".
+      PORT: "3000"
+      OLLAMA_BASE_URL: {{ .OllamaURL }}
+      WEBUI_NAME: {{ .WebUIName }}
+      # OpenAI-compatible connections populated by `stables fetch webui` from
+      # ~/.stables/models.json (written to the compose .env file).
+      OPENAI_API_BASE_URLS: "${OPENAI_API_BASE_URLS:-}"
+      OPENAI_API_KEYS: "${OPENAI_API_KEYS:-}"
+    ports:
+      - "{{ .ListenHost }}:{{ .WebUIPort }}:3000"
+    volumes:
+      - {{ .Name }}-open-webui-data:/app/backend/data
+    networks:
+      - {{ .Name }}-webui
+    # Linux: host.docker.internal is not auto-resolvable; map it to the host
+    # gateway so OLLAMA_BASE_URL=http://host.docker.internal:11434 reaches the
+    # host's Ollama (local or tunneled).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  {{ .Name }}-webui:
+    name: {{ .Name }}-webui
+{{- if .NetworkSubnet }}
+    driver: bridge
+    ipam:
+      config:
+        - subnet: {{ .NetworkSubnet }}
+{{- end }}
+
+volumes:
+  {{ .Name }}-open-webui-data:

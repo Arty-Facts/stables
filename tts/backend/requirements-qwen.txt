@@ -1,0 +1,15 @@
+# Optional: zero-shot voice cloning with Qwen3-TTS (Apache-2.0).
+#
+# Kept out of requirements.txt on purpose. qwen-tts pins transformers to one
+# exact version, depends on gradio, and needs 1.2 GB (0.6B) to 3.4 GB (1.7B) of
+# weights before it can speak. Kokoro and Piper cover the base install, so this
+# is only wanted on a machine that will actually clone a voice.
+#
+# Install with:  pip install -r backend/requirements-qwen.txt
+#
+# Weights download on first use into HF_HOME (~/.stables/tts/hf); the 1.7B
+# checkpoint is fetched from Qwen/Qwen3-TTS-12Hz-1.7B-Base.
+
+-r requirements.txt
+
+qwen-tts
