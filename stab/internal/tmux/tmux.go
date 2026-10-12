@@ -30,15 +30,48 @@ type WindowCommand struct {
 // (Pi) so `stab .` drops the user straight into the harness; shell, logs, and
 // a help window are secondary.
 func DefaultLayout(harnessCommand, configDir string) []WindowCommand {
-	if harnessCommand == "" {
-		harnessCommand = "pi"
-	}
 	return []WindowCommand{
-		{Name: WindowMain, Command: harnessCommand},
+		{Name: WindowMain, Command: HarnessWindowCommand(harnessCommand)},
 		{Name: WindowShell, Command: "bash"},
 		{Name: WindowLogs, Command: "tail -F /var/log/stab/runtime.log 2>/dev/null || sleep infinity"},
 		{Name: WindowHelp, Command: HelpWindowCommand(configDir)},
 	}
+}
+
+// HarnessCommand returns the harness command to run, defaulting to Pi. Every
+// caller (layout and probes) must go through this so they agree on what runs.
+func HarnessCommand(harnessCommand string) string {
+	if harnessCommand == "" {
+		return "pi"
+	}
+	return harnessCommand
+}
+
+// HarnessBinary returns the program a harness command starts (its first word),
+// which is what has to exist on PATH for the main window to work.
+func HarnessBinary(harnessCommand string) string {
+	fields := strings.Fields(HarnessCommand(harnessCommand))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// HarnessWindowCommand wraps the harness command so the window survives a
+// harness that cannot start. tmux deletes a window the moment its command
+// exits, so a missing harness (or a crash before it draws anything) removed
+// the main window silently: no error, no trace, just a session without the
+// harness. Here the failure is reported and an interactive shell takes the
+// window over, keeping both the window and the reason visible.
+func HarnessWindowCommand(harnessCommand string) string {
+	h := HarnessCommand(harnessCommand)
+	return fmt.Sprintf(`%s; __stab_harness_rc=$?; `+
+		`if [ "$__stab_harness_rc" -ne 0 ]; then `+
+		`echo; `+
+		`echo "[stab] harness failed (status $__stab_harness_rc): %s"; `+
+		`echo "[stab] starting a shell instead; rebuild the runtime with: stab update"; `+
+		`exec bash -l; `+
+		`fi`, h, h)
 }
 
 // HelpWindowCommand renders the keybinding cheat-sheet by reading the comment
@@ -62,6 +95,13 @@ func AgentWindow(agentID string, command string) WindowCommand {
 // HasSession builds a query that exits non-zero if the session does not exist.
 func HasSession(session string) []string {
 	return []string{"tmux", "has-session", "-t", session}
+}
+
+// ListWindows builds a query that prints one window name per line, so callers
+// can tell whether a specific window still exists in a session. tmux removes a
+// window whose command exited, so a session can outlive the harness window.
+func ListWindows(session string) []string {
+	return []string{"tmux", "list-windows", "-t", session, "-F", "#{window_name}"}
 }
 
 // NewSession builds the command that creates a detached session and its

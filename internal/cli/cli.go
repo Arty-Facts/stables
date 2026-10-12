@@ -20,7 +20,10 @@ import (
 	"github.com/stables/stables/internal/tunnel"
 )
 
-const Version = "0.2.0"
+// Version is the semantic version of this build. Keep it in step with
+// stab/internal/version/version.go: `stables` reports itself and installs the
+// `stab` binary it was built with, so one release, one version.
+const Version = "0.3.0"
 
 func Run(args []string) int {
 	if len(args) < 2 {
@@ -102,7 +105,7 @@ func unknownComponent(name string) int {
 // how the ghost was found.
 var knownInstallFlags = []string{
 	"--force", "--password", "--gpu", "--data-dir", "--listen", "--port",
-	"--preload", "--no-container", "--no-models", "--ollama-url", "--ollama-port",
+	"--preload", "--flash-attn", "--no-container", "--no-models", "--ollama-url", "--ollama-port",
 	"--webui-port", "--name", "--network-subnet",
 }
 
@@ -202,6 +205,7 @@ func cmdInstall(ctx context.Context, home string, args []string) int {
 			NoContainer: hasFlag(args, "--no-container"),
 			NoModels:    hasFlag(args, "--no-models"),
 			Preload:     hasFlag(args, "--preload"),
+			FlashAttn:   hasFlag(args, "--flash-attn"),
 		}
 		if err := ttscmp.Install(ctx, opts); err != nil {
 			fmt.Fprintln(os.Stderr, "stables: tts:", err)
@@ -274,11 +278,32 @@ func cmdCleanInstall(ctx context.Context, home string, args []string) int {
 	}
 	// hard remove: wipe data volumes, then fresh install
 	removeLocal(ctx, home, component, true)
-	return cmdInstall(ctx, home, []string{component})
+	return cmdInstall(ctx, home, append([]string{component}, installFlags(args)...))
 }
 
 // cmdReinstall is a soft reinstall by default (down + up, keeping data
 // volumes); `--clean` wipes them first for a fresh system.
+// installFlags keeps the flags from *args*, with their values.
+//
+// reinstall and clean-install remove a component and then install it again; they used
+// to do that without passing the flags along, so `reinstall tts --preload` — or --gpu,
+// or --listen — silently installed with the defaults instead. The user had asked for
+// something and got something else, which is worse than an error.
+func installFlags(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		if !strings.HasPrefix(args[i], "-") {
+			continue
+		}
+		out = append(out, args[i])
+		if flagTakesValue(args[i]) && i+1 < len(args) {
+			i++
+			out = append(out, args[i])
+		}
+	}
+	return out
+}
+
 func cmdReinstall(ctx context.Context, home string, args []string) int {
 	component := componentArg(args, "")
 	if component == "" || !checkComponent(component) {
@@ -289,7 +314,7 @@ func cmdReinstall(ctx context.Context, home string, args []string) int {
 		return 2
 	}
 	removeLocal(ctx, home, component, hasFlag(args, "--clean"))
-	return cmdInstall(ctx, home, []string{component})
+	return cmdInstall(ctx, home, append([]string{component}, installFlags(args)...))
 }
 
 func removeLocal(ctx context.Context, home, component string, hard bool) {
@@ -793,7 +818,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   stables install <component> [--force] [--password <pw>] [stab|ollama|webui|tts|all]
         [--gpu auto|cuda|cpu|rocm] [--data-dir PATH] [--listen auto|0.0.0.0]
-        [--port N] [--preload] [--no-container] [--no-models]
+        [--port N] [--preload] [--flash-attn] [--no-container] [--no-models]
         [--ollama-url URL] [--ollama-port N] [--webui-port N] [--name N]
         [--network-subnet CIDR]
   stables remote install [stab|ollama] user@host [--force]
@@ -834,7 +859,7 @@ Components, each independent of the others:
 
 Options:
   --force  --password <pw>  --gpu auto|cuda|cpu|rocm  --data-dir PATH
-  --listen auto|0.0.0.0  --port N  --preload  --no-container  --no-models
+  --listen auto|0.0.0.0  --port N  --preload  --flash-attn  --no-container  --no-models
   --ollama-url URL  --ollama-port N  --webui-port N  --name N
   --network-subnet CIDR
 

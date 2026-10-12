@@ -172,9 +172,31 @@ class QwenEngine:
                 pass
 
         model = Qwen3TTSModel.from_pretrained(self._model_ids[size], **kwargs)
+        # qwen_tts loads the speech tokenizer in a from_pretrained of its own, apart
+        # from the language model. The language model does get our dtype — the wrapper
+        # forwards kwargs verbatim — but the tokenizer path is the one that can end up
+        # requesting flash-attn without one, which is what transformers warns about.
+        # Its internals are not ours to fix, so the tokenizer is pinned to eager
+        # instead: it is a small codec where eager costs nothing measurable, and the
+        # language model keeps the acceleration. Fail-safe: this changes which
+        # attention kernel runs, never a weight or a precision.
+        self._pin_tokenizer_to_eager(model)
         self._model = model
         self._loaded_size = size
         return model
+
+    @staticmethod
+    def _pin_tokenizer_to_eager(model) -> None:
+        """Keep the speech tokenizer off flash-attn. See the note in `_load`."""
+        walk = getattr(getattr(model, "model", None), "named_modules", None)
+        if walk is None:
+            return
+        for name, module in walk():
+            if "speech_tokenizer" not in name:
+                continue
+            config = getattr(module, "config", None)
+            if config is not None and getattr(config, "_attn_implementation", None) not in (None, "eager"):
+                config._attn_implementation = "eager"
 
     def preload(self, size: str | None = None) -> str:
         """Load a checkpoint now, so the first request does not wait on a download.

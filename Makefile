@@ -3,6 +3,12 @@ BIN ?= stables
 TARGET ?=
 PYTHON ?= python3
 PI_AGENT ?= $(HOME)/.pi/agent
+# Release binaries are static on purpose: nothing in the tree needs cgo (SQLite
+# is the pure-Go modernc.org/sqlite), and `stables remote install` scp's the
+# binary to a server whose libc is unknown. A cgo build links the builder's
+# glibc and dies there with "GLIBC_2.3x not found".
+CGO_ENABLED ?= 0
+export CGO_ENABLED
 # bash needed for `read -s` (no-echo password prompt) in build-secrets
 SHELL := /bin/bash
 

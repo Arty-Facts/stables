@@ -15,6 +15,387 @@ an entry. See `AGENTS.md` → "Change log discipline".
 
 ---
 
+## The harness is installed where the runtime can reach it
+
+**Observed behavior.** `stab .` attached to a tmux layout with no harness window and no error.
+The session had three windows and `main` was simply gone:
+
+```
+$ docker exec -u coder stab-afe58b7e4e80 tmux list-windows -t stab
+1: shell   2: logs-   3: help*
+$ docker exec -u coder stab-afe58b7e4e80 tmux capture-pane -p -t stab:main
+can't find window: main
+```
+
+`pi` was not on the container user's PATH at all:
+
+```
+$ docker exec -u coder stab-afe58b7e4e80 bash -lc 'command -v pi'
+(no output)
+$ docker exec -u coder stab-afe58b7e4e80 tmux show-environment -g | grep PATH
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+```
+
+Three compounding causes:
+
+1. Both runtime Dockerfiles ran `RUN curl -fsSL https://pi.dev/install.sh | sh` as
+   **root**, so the managed install landed in root's home — `/root/.pi/agent/bin/pi`,
+   unreadable by `coder`. The installer's PATH step is interactive-only (it returns early
+   when `/dev/tty` is absent), so the piped build never wrote PATH to any shell profile
+   either; `/root/.bashrc` and `/root/.profile` were unchanged.
+2. The obvious repair — install for `coder` under `/home/coder/.pi/agent` — cannot work in
+   the image: the controller bind-mounts the host's `~/.pi/agent` over that path at
+   runtime, hiding whatever was baked there.
+3. tmux deletes a window the moment its command exits, and `tmux new-session` still exits
+   0 when that happens. A missing harness therefore removed the main window silently, and
+   `ensureTmuxSession` returned early whenever `has-session` succeeded, so later `stab`
+   runs never repaired it. Reproduced directly:
+
+```
+$ docker exec -u coder stab-afe58b7e4e80 tmux new-window -d -t stab -n repro 'pi'
+$ sleep 3; docker exec -u coder stab-afe58b7e4e80 tmux list-windows -t stab
+1: shell   2: logs-   3: help*          # the repro window is already gone, exit status 0
+```
+
+**Intended behavior.** Every container has a working harness on PATH by itself, without
+relying on the host's `~/.pi/agent` (which on a fresh remote host contains no Pi install at
+all, and on a developer host merely happened to contain `bin/pi` — one PATH entry away, which
+is why this looked like a tmux bug). Pi's managed install lives outside `$HOME` so the mount
+cannot hide it, and is reachable from both kinds of shell a user meets: the non-login shells
+tmux windows use and login shells, which reset PATH from `/etc/profile`. If the harness is
+still missing, `stab .` fails with an actionable error instead of attaching to a layout with
+no harness, and a harness that dies at startup leaves a visible message and a shell rather
+than deleting its window. `stab bash` and `stab update` keep working on such a container —
+they are the way in — so only the path that drops the user into the harness insists on it.
+
+**Change.**
+
+- `stab/runtime/Dockerfile` and `stab/runtime/Dockerfile.gpu`: install Pi with
+  `PI_CODING_AGENT_DIR=/opt/pi-agent`, `chown -R coder:coder /opt/pi-agent`, and put
+  `${PI_INSTALL_ROOT}/bin` on PATH via `ENV PATH` (docker exec, tmux windows) and
+  `/etc/profile.d/pi-agent.sh` (login shells — `/etc/profile` overwrites PATH).
+  `PI_CODING_AGENT_DIR` is set for the installer only; at runtime Pi still reads its config
+  from the mounted `/home/coder/.pi/agent`.
+- Both files also stop piping the download into the interpreter: `curl ... | sh` exits 0 when
+  the download fails because the interpreter reads an empty script, which produced a green
+  build with no Pi in it (verified: `curl -fsSL https://127.0.0.1:1/nope | sh` exits 0). The
+  installer and the NodeSource setup script are fetched to a file first, then executed.
+- `stab/runtime/entrypoint.sh`: re-own `/opt/pi-agent` after the `usermod` uid/gid alignment.
+  The image bakes it owned by uid 1000, so on any host whose PUID is not 1000 the baked owner
+  would stop matching `coder` and `pi update` / `pi install` would fail with EACCES.
+- `stab/internal/tmux`: the main window runs the harness through a guard that reports the
+  exit status and falls back to an interactive shell, so a failing harness can no longer
+  delete its own window; new `ListWindows`, `HarnessCommand` and `HarnessBinary` helpers keep
+  the layout and the probes agreeing on what runs.
+- `stab/internal/project`: `probeHarness` verifies the harness in a login shell from the
+  project directory before the npm prewarm and before any tmux window is created, and
+  `ensureTmuxSession` now recreates a main window that tmux deleted, repairing containers
+  built from the old template without recreating them.
+- `stab/internal/cli`: only `stab .` requires the harness.
+- `stab/runtime/embed.go`: `TemplateVersion` 7 → 8.
+
+**Verification.** `go vet ./...` clean in both modules; `go test ./internal/...` in `stab/`
+passes (`internal/cli`'s `TestEnsureProjectConfigDoesNotEmbedModels` already failed before
+this change and is untouched). End to end with `STAB_BIN=<stab binary>
+agent_tools/check_stab_harness.sh`, which builds the image from a scratch `HOME` whose
+`~/.pi/agent` deliberately has **no** Pi install and mounts it into a real container — all
+checks passed: main window exists (`tmux list-windows -t stab -F '#{window_name}'` →
+`main shell logs help`), `pi --version` (1.1.0) works as `coder` for both plain and `bash -lc`
+invocation, the main pane draws the Pi TUI, `/opt/pi-agent/install` is writable by `coder`,
+the image no longer contains `/root/.pi`, and `/etc/profile.d/pi-agent.sh` is present. With
+the harness set to a nonexistent command, `stab .` exits non-zero with `harness
+"definitely-not-a-harness" is not available inside …` and creates no window.
+
+**Upgrading.** The Dockerfile is embedded in the `stab` binary, so an existing deployment
+keeps its old image until the container is rebuilt: run `stab update` (rebuild + recreate), or
+`stab kill` followed by `stab .`. A container that is already missing its main window is
+repaired on the next `stab .`.
+
+## The selected voice is actually sent in auto language mode
+
+**Observed behavior.** With `lang_mode = "auto"`, every utterance came back in `af_heart`
+whatever voice was selected in the menu. Verified against a running stack:
+
+```
+voice=auto   -> 200 engine=kokoro voice=af_heart
+(no voice)   -> 200 engine=kokoro voice=af_heart
+```
+
+In auto language mode the client sent `voice="auto"` rather than the selected voice, so the
+server resolved the language default. The comment immediately above that line says the
+opposite — "the server picks it from the voice, which is the only thing that knows" — and
+the non-auto branch does pass the voice through. The effect was that the voice menu was
+decorative in the default mode, and **no cloned voice could be spoken at all**, because
+`language_default` returns a Kokoro voice and a clone is never reachable through it.
+
+**Intended behavior.** After this change, what is spoken is what was selected. Auto language
+mode means the server derives the language from the voice, not that the voice becomes
+"auto". An unset voice still sends the empty string, which the server treats as auto, so the
+first request before the list arrives behaves as before.
+
+**Change.** `tts/tui/src/main.rs`: both request paths send `voice.clone()`. Verified here as
+far as this container allows: the file **parses** under `rustc --edition 2021`
+(`rustc` 1.85.1, a parse check — the crate's dependencies are not installed, so it cannot
+be type-checked), and the replacement reuses `voice` in exactly the form the adjacent
+branch already uses, so the tuple types match that branch by construction. `make build` or
+`cargo test` is still the real check.
+
+**Verification (of the diagnosis, not of the fix).** The backend was exercised directly
+under a running stack: `voice=arty` → 200 `engine=qwen`, `voice=af_heart` → 200
+`engine=kokoro`, `voice=auto` and no voice → 200 `engine=kokoro voice=af_heart`. The backend
+honours an explicit voice, so the symptom came from what the client asked for.
+
+## The speech tokenizer is kept off flash-attn
+
+**Observed behavior.** With flash-attn installed, loading the cloning engine printed:
+
+```
+You are attempting to use Flash Attention 2 without specifying a torch dtype. This might lead to unexpected behaviour
+```
+
+The phrasing is transformers': the check is literally `if dtype is None`, so it is about a
+load that requests flash-attn without naming a dtype. flash-attn accepts only fp16/bf16,
+so such a load is either an error or wrong numerics.
+
+**Intended behavior.** flash-attn accelerates the language model, which is where the time
+goes, and components that cannot use it safely do not request it.
+
+**Change.** `tts/backend/engines/qwen.py`: `_pin_tokenizer_to_eager` walks the module tree
+after loading and moves any module named `speech_tokenizer` that requests anything other
+than eager attention back to `eager`, so the mismatch cannot happen there. Written to
+survive a layout it does not recognise — no match, no walk, no change — rather than
+raising. Fail-safe by design: it changes which attention kernel runs, never a weight or a
+precision.
+
+**Verified.** The language model does receive our dtype: `qwen_tts`'s `Qwen3TTSModel`
+forwards `**kwargs` verbatim and its docstring names `dtype=torch.bfloat16`, and the
+engine passes `torch.bfloat16` on CUDA. The tokenizer is loaded by a **separate**
+`from_pretrained` that is called with `**kwargs` but whose own internals could not be
+inspected from outside.
+
+**Not verified.** Which load emits the warning. The engine keeps its dtype and the
+tokenizer is pinned to eager either way, so the remaining check is the observable one:
+
+```
+./stables install tts --preload --flash-attn      # the warning should not appear now
+```
+
+If it still appears, the pin is in the wrong place and the warning is cosmetic — the
+clone either works or it does not, and that is the next thing to run.
+
+## A clone without a language tag stays visible in every language tab
+
+**Observed behavior.** Renaming a reference from `arty.en.mp3` to `arty.mp3` is supported —
+the id becomes the stem, `arty`, and the language reads as `auto` — but the voice then
+disappeared from the list whenever a language tab was selected. `tts/tui/src/app.rs` filtered
+voices with `v.lang == lang`, an exact comparison, and `auto` matches no language.
+
+**Intended behavior.** `auto` means the voice fits any language, so it belongs in every
+tab. A clone's language comes from its reference audio, not from its filename.
+
+**Change.** `tts/tui/src/app.rs`: the filter accepts `auto` alongside the selected
+language. **Not verified here** — this container has no Rust toolchain, so `cargo test`
+and `make build` are what confirm it.
+
+## flash-attn, for faster cloning, behind `--flash-attn`
+
+**Observed behavior.** Every load of the cloning engine printed:
+
+```
+Warning: flash-attn is not installed. Will only run the manual PyTorch version.
+```
+
+That was accurate rather than misleading: the engine already probes for flash-attn and
+passes `attn_implementation="flash_attention_2"` when the import succeeds, so the package
+was simply never installed. Installing it from source needs an nvcc matching the CUDA
+12.4 wheels and 20+ minutes per image build.
+
+**Intended behavior.** Opt in with `--flash-attn` and cloning attention goes through
+flash-attn. Without it, the engine keeps using the manual PyTorch path and stays correct —
+which is what the existing probe already does, so this flag only decides whether the
+wheel is in the image. On a CPU host `--flash-attn` is **dropped with a warning rather
+than failing the build**: flash-attn has no CPU build, and losing a multi-gigabyte build
+to an inapplicable flag is worse than ignoring it. Fail-safe by design.
+
+**Change.** `tts/backend/Dockerfile`: `torch`/`torchaudio` pinned to `==2.6.0` and
+`flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl`
+installed under `WITH_FLASH_ATTN`, in a layer of its own placed after the pip layers so
+flipping the flag rebuilds only the tail. The wheel tag has to match the image's torch,
+CUDA, Python and C++ ABI exactly — `torch._C._GLIBCXX_USE_CXX11_ABI` is `False` on this
+image, which chose `cxx11abiFALSE` — so the build **asserts `import flash_attn`**, making a
+future torch bump fail the build rather than quietly drop the acceleration. The pin is
+not cosmetic: the previously unpinned `pip install torch` would have floated to a torch
+the wheel does not match. `assets/tts/docker-compose.yml.tmpl` and
+`internal/{components/tts,cli}` carry the flag through to the build, and `/health`
+reports `flash_attn`.
+
+**Verification.** Backend suite green (161 tests) and the Go component and CLI suites
+green, including that the compose template passes `WITH_FLASH_ATTN` for both values and
+that the Dockerfile keeps the torch pin, the wheel tag, the `WITH_FLASH_ATTN` gate and
+the import assertion. The wheel's exact asset name was read from the release's own API
+rather than guessed. **The image build itself is not verified here** — that needs the GPU
+host:
+
+```
+./stables install tts --preload --flash-attn
+curl -s localhost:17493/health | grep -o '"flash_attn": *[a-z]*'
+```
+
+## SoX ships with the backend, so an mp3 reference can be loaded
+
+**Observed behavior.** `stables install tts --preload` installed the cloning engine and
+then failed on the first use of a cloned voice:
+
+```
+stables: tts: fetching the cloning engine's weights (gigabytes)
+/bin/sh: 1: sox: not found
+SoX could not be found!
+```
+
+The engine loads the reference audio through torchaudio, which decodes compressed
+formats with SoX. The image installed `ffmpeg` and `libsndfile1` — enough for the WAV
+references used in testing — but not SoX, so an mp3 reference, which is the format people
+actually have, could not be read.
+
+**Intended behavior.** A format the backend advertises support for can be loaded. The
+registry accepts `.mp3` and `.flac` (see the entry above), so the runtime has to be able
+to read them.
+
+**Change.** `tts/backend/Dockerfile`: `sox` and `libsox-fmt-all`, in a layer of their own
+placed after the pip layers. Deliberate: nothing above depends on SoX at build time, and
+putting the `apt-get` here means adding it does not invalidate the torch and pip layers
+and force a multi-gigabyte rebuild.
+
+**Verification.** Not yet run end to end — the fix needs an image rebuild and a clone to
+confirm, which is one command on a machine with the GPU.
+
+## Download a WAV with one curl
+
+**Observed behavior.** Debugging the voice backend meant `POST /v1/tts`, which returns
+base64 inside JSON: unwrap, decode, write a file, play it. Comparing two voices — the
+thing to do whenever a voice "sounds wrong" — needed a script rather than a command.
+
+**Intended behavior.** One line at a shell:
+
+```
+curl -o arty.wav 'localhost:17493/v1/tts.wav?voice=arty.en&text=hello'
+```
+
+A GET with the text in the query, because the point is to be typable. The filename comes
+back in `Content-Disposition`, so `curl -OJ` writes `arty.wav`.
+
+**The text must be percent-encoded**, or passed with `-G --data-urlencode`:
+
+```
+curl -o arty.wav 'localhost:17493/v1/tts.wav?voice=arty&text=hello%20there'
+curl -o arty.wav -G 'localhost:17493/v1/tts.wav' --data-urlencode 'voice=arty' --data-urlencode 'text=hello there'
+```
+
+A raw space is rejected by curl before the request leaves the machine —
+
+```
+curl: (3) URL rejected: Malformed input to a URL function
+```
+
+— and quoting does not help, because the quotes are removed by the shell and this happens
+afterwards. Worth knowing that this failure is client-side: nothing reaches the server, so
+there is no log line and no 4xx to look at.
+
+**Change.** `tts/backend/routes/tts.py`: `GET /v1/tts.wav`, sharing `_synthesize` and the
+language resolution with the JSON endpoint so the two cannot drift apart, plus
+`_friendly_voice` for the name lookup.
+
+**Verification.** Backend suite green: the response is a RIFF/WAVE file with the voice
+in its filename, the engine and sample rate come back as headers, and an unknown voice is
+a 404. Checked against a running stack as well: `af_heart` → 200 from the `kokoro` engine,
+`arty` → 200 from the `qwen` engine with different audio, and a stale id → 404 with the id
+named in the `detail`. **The `voice=Arty` name lookup is not covered** — the registry does not select a
+stub clone engine for a cloned id in the test harness, so the test was removed rather
+than left passing for the wrong reason. Use the id (`arty.en`), which is tested.
+
+## Reinstalling keeps the flags you gave it
+
+**Observed behavior.** `stables reinstall tts --preload` reported success and installed
+without the cloning engine:
+
+```
+=> [ 8/11] RUN if [ "0" = "1" ]; then pip install --no-cache-dir -r /tmp/requirements-qwen.txt; fi
+stables: tts: engines available: kokoro, piper
+stables: install complete
+```
+
+`reinstall` and `clean-install` remove the component and then call the installer with
+`[]string{component}` — the flags were dropped on the way through. So `--preload`
+became the default, which is why the build argument was `0` and the engine never
+arrived, and "install complete" is why it looked like it had. `--gpu`, `--listen`,
+`--port`, `--no-models` and `--data-dir` were dropped the same way.
+
+**Intended behavior.** A flag the user passes reaches the installer. Asking for
+something, getting something else, and being told it succeeded is the failure mode the
+rules in this file exist to prevent.
+
+**Change.** `internal/cli/cli.go`: `installFlags` keeps the flags and their values from
+the original arguments, and both commands forward them.
+
+**Verification.** The Go suite passes, including a test that `--preload --gpu cpu --port
+17494 --force` survives the forwarding while a bare component name is not mistaken for
+a flag.
+
+## Reinstalling no longer fights the stack it is replacing
+
+**Observed behavior.** A rebuild while the stack was in use failed twice, for two
+unrelated reasons:
+
+```
+stables: tts: open /home/arty/.local/bin/ratts-cli: text file busy
+stables: tts: port 17493 is already in use on 127.0.0.1, so the container cannot publish there
+  choose another one, for example: stables install tts --port 17494
+```
+
+The first is Linux refusing to replace a binary while it is being executed — the client
+was open. The second is the port pre-flight finding the port held by the very stack
+being reinstalled, and suggesting a different port for the same stack.
+
+**Intended behavior.** A running client is a warning, not a reason to refuse: the
+backend is what is being replaced, and refusing means it cannot be updated while the
+client is open. A port held by a stack installed from the same directory is not a
+conflict at all.
+
+**Change.** `internal/components/tts/tts.go`, two fixes. When the client cannot be
+written, the install warns, falls back to the copy inside the install directory and
+carries on, because the backend is the part being replaced. And `takeOverPort` takes the
+port instead of refusing it: it stops the compose project in the install directory, and
+if that is not what holds the port — a container left by an install made from a
+different home, which is how two stacks come to fight over one port — it removes that
+container by name. Only this component's own container is ever touched, never one that
+merely happens to hold the port.
+
+**Not verified against a running stack.** Exercising it needs a live stack, and stopping
+someone's running one to prove a point is their call, not the installer's. The Go suite
+passes and both paths are compile-checked.
+
+## Compressed reference audio is accepted
+
+**Observed behavior.** A voice added as `~/.stables/voices/arty.en.mp3` did not appear
+in the voice list. The registry accepted only `.wav` and `.flac`, so the file was
+skipped without a word — the naming convention was right (`arty.en` parses as the name
+`arty` in language `en`) and the format was the only thing wrong.
+
+**Intended behavior.** `name.language.extension`, where an extension the backend can
+decode is enough. `libsndfile` is already a dependency and decodes flac and mp3 itself,
+so refusing a file that plays only asked the user to convert something the backend could
+already read. This is fail-safe by design: an unreadable file is skipped, not an error.
+
+**Change.** `tts/backend/voices.py`: `SUFFIXES` gains `.mp3`, with the cost named in the
+comment — an mp3's bitrate and any resampling the encoder applied travel into the clone,
+so wav stays the recommendation for a reference.
+
+**Verification.** 157 backend tests, including that an mp3 reference is listed and
+resolved. The capability was confirmed in the image before changing anything:
+`soundfile.available_formats()` reports `MP3: True`. The running stack needs the image
+rebuilt to pick this up (`stables install tts`, or `docker compose build` in
+`~/.stables/tts`); the mounted weights mean no re-download.
+
 ## 0.2.0 — the voice stack
 
 Stables can speak. `stables install tts` deploys a local voice backend (Kokoro,

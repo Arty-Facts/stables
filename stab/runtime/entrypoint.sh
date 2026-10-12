@@ -55,10 +55,18 @@ fi
 # Remaining code-server state dirs and the project's .stables dir must be
 # writable by coder. The sessions mkdir is best-effort so read-only mounts
 # cannot skip the chown that follows.
+#
+# /opt/pi-agent is the image's own Pi managed install (see the Dockerfile). It
+# is baked owned by the image's uid (1000), and `usermod -o -u` above re-targets
+# the coder account instead of the files — so on any host whose PUID is not 1000
+# the baked owner stops matching coder and `pi update` / `pi install` (which
+# write the managed root) fail with EACCES. Container-local, never mounted:
+# safe to re-own wholesale.
 mkdir -p "$PROJECT_DIR/.stables/sessions" 2>/dev/null || true
 chown -R coder:coder \
     /home/coder/.config \
     /home/coder/.local \
+    /opt/pi-agent \
     /stab-state \
     "$PROJECT_DIR/.stables" 2>/dev/null || true
 

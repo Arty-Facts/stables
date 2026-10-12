@@ -26,9 +26,13 @@ from .engines.base import Voice
 CLONE_ENGINE = "qwen"
 
 #: Audio the engines can read. `.wav` is the normal case and what a transcoder
-#: should write; the others are accepted because refusing a file that plays is a
-#: poor way to be strict.
-SUFFIXES = (".wav", ".flac")
+#: should write, but libsndfile — already a dependency — decodes flac and mp3
+#: itself, so refusing a file that plays would only mean asking the user to convert
+#: something the backend can already read.
+#:
+#: The cost of a compressed reference is worth naming: an mp3's bitrate, and any
+#: resampling the encoder did, travel into the clone. Wav stays the recommendation.
+SUFFIXES = (".wav", ".flac", ".mp3")
 
 TRANSCRIPT_SUFFIX = ".txt"
 

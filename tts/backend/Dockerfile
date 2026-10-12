@@ -13,6 +13,7 @@ ARG USE_GPU=1
 # exact version and pulls gradio, and its weights are gigabytes, which is a lot to
 # carry for a machine that will never clone a voice.
 ARG WITH_QWEN=0
+ARG WITH_FLASH_ATTN=0
 
 WORKDIR /app
 
@@ -32,10 +33,10 @@ COPY backend/requirements-qwen.txt /tmp/
 # another. The torch download is gigabytes.
 RUN if [ "$USE_GPU" = "1" ]; then \
       # CUDA build: its nvidia-* wheel dependencies carry the libraries below.
-      pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu124; \
+      pip install --no-cache-dir torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124; \
     else \
       # CPU build: a tenth of the size and nothing to fall back from.
-      pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu; \
+      pip install --no-cache-dir torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu; \
     fi
 
 RUN sed '/^torch/d' /tmp/requirements.txt > /tmp/requirements-docker.txt \
@@ -83,6 +84,29 @@ COPY backend/ ./backend/
 #
 # Deliberately no VOLUME here. A VOLUME declaration would put an anonymous volume
 # over this path and leave one behind on every recreate, hiding the mount.
+
+# flash-attn, for the cloning engine's attention. Installed from a prebuilt wheel: the
+# fragile part is that a wheel is built against one exact torch, so the three are pinned
+# together — the torch==2.6.0 above, the cu124 index, and the wheel's own tag
+# (torch2.6, cxx11abiFALSE, cp311, from `torch._C._GLIBCXX_USE_CXX11_ABI` on this
+# image). Building from source would need a matching nvcc and 20+ minutes; instead the
+# import is asserted here, so a future torch bump fails the build rather than silently
+# losing the acceleration. --no-deps so the wheel cannot reinstall torch underneath us.
+RUN if [ "$WITH_FLASH_ATTN" = "1" ] && [ "$USE_GPU" = "1" ]; then \
+      pip install --no-cache-dir --no-deps "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" \
+      && python -c "import flash_attn, torch; print('flash-attn', flash_attn.__version__, 'on torch', torch.__version__)"; \
+    elif [ "$WITH_FLASH_ATTN" = "1" ]; then \
+      echo "WITH_FLASH_ATTN=1 needs USE_GPU=1 (flash-attn has no CPU build): skipping it" >&2; \
+    fi
+
+# SoX, for the audio the cloning engine loads. torchaudio decodes the reference
+# through it, and a reference in mp3 — the format people actually have — fails
+# without it: "SoX could not be found!". Its own layer on purpose: this is a system
+# package, nothing above it depends on it at build time, and putting it here means
+# adding it does not invalidate the torch and pip layers and cost a full rebuild.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends sox libsox-fmt-all \
+ && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 17493
 

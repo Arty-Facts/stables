@@ -193,3 +193,36 @@ def test_models_are_the_base_cloning_checkpoints():
     for size, model_id in qwen_module.MODELS.items():
         assert model_id.endswith("-Base"), f"{size} must be a cloning checkpoint"
         assert model_id.startswith("Qwen/Qwen3-TTS-")
+
+
+def test_the_speech_tokenizer_is_pinned_to_eager_attention():
+    """The checkpoint loads its tokenizer in fp32 while the attention implementation
+    still propagates, which is a flash-attn-on-fp32 mismatch. Pinning the tokenizer to
+    eager removes it without touching precision."""
+    from backend.engines.qwen import QwenEngine
+
+    class Config:
+        _attn_implementation = "flash_attention_2"
+
+    class Tokenizer:
+        config = Config()
+
+    class Inner:
+        def named_modules(self):
+            return [("codec.speech_tokenizer", Tokenizer())]
+
+    class Model:
+        model = Inner()
+
+    QwenEngine._pin_tokenizer_to_eager(Model())
+    assert Tokenizer.config._attn_implementation == "eager"
+
+
+def test_pinning_eager_survives_a_layout_it_does_not_recognise():
+    """Fail-safe: an unexpected module tree must not raise."""
+    from backend.engines.qwen import QwenEngine
+
+    class Model:
+        model = object()
+
+    QwenEngine._pin_tokenizer_to_eager(Model())

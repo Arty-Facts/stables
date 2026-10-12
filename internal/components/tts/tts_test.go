@@ -575,3 +575,41 @@ func TestTheClientPathsCoverWhereTheInstallerWrites(t *testing.T) {
 		t.Errorf("the recorded path must be included: %v", paths)
 	}
 }
+
+func TestRenderComposeTellsTheBuildWhetherToIncludeFlashAttn(t *testing.T) {
+	skipWithoutAssets(t)
+	// Optional acceleration, so off unless asked for: a plain install keeps the image
+	// small and the build short.
+	for flash, want := range map[bool]string{true: `WITH_FLASH_ATTN: "1"`, false: `WITH_FLASH_ATTN: "0"`} {
+		d := DefaultData("/home/alice")
+		d.FlashAttn = flash
+		b, err := RenderCompose(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), want) {
+			t.Errorf("flash=%v: compose must pass %s:\n%s", flash, want, b)
+		}
+	}
+}
+
+func TestFlashAttnStaysPinnedToTheTorchItWasBuiltFor(t *testing.T) {
+	// The wheel is compiled against one torch build and one C++ ABI, so the pins are
+	// load-bearing: move torch without moving the wheel and the import assertion in
+	// the Dockerfile fails the build. This guards the pins themselves.
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "tts", "backend", "Dockerfile"))
+	if err != nil {
+		t.Skipf("Dockerfile not readable: %v", err)
+	}
+	dockerfile := string(raw)
+	for _, want := range []string{
+		"torch==2.6.0",
+		"torch2.6cxx11abiFALSE-cp311",
+		`[ "$WITH_FLASH_ATTN" = "1" ]`,
+		"import flash_attn",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("the Dockerfile must keep %q: the flash-attn wheel is built for one exact torch", want)
+		}
+	}
+}

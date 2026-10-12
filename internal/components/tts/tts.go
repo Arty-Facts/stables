@@ -41,6 +41,10 @@ type Options struct {
 	// the engine in the image, because fetching weights for an engine that is not
 	// installed would achieve nothing.
 	Preload bool
+	// FlashAttn installs flash-attn for the cloning engine's attention. GPU-only and
+	// optional: without it the engine runs the manual PyTorch path, which is slower
+	// but correct, and the transformer warns about it on every load.
+	FlashAttn bool
 }
 
 // Data is what the compose template renders from.
@@ -50,6 +54,7 @@ type Data struct {
 	ListenHost  string
 	GPUEnabled  bool
 	QwenEnabled bool
+	FlashAttn   bool
 	ModelsDir   string
 	VoicesDir   string
 	HFCacheDir  string
@@ -86,6 +91,7 @@ func DefaultData(home string) Data {
 		Port:        defaultPort,
 		ListenHost:  "127.0.0.1",
 		QwenEnabled: false,
+		FlashAttn:   false,
 		ModelsDir:   filepath.Join(base, "models"),
 		VoicesDir:   filepath.Join(home, ".stables", "voices"),
 		HFCacheDir:  filepath.Join(base, "hf"),
@@ -125,6 +131,7 @@ func Install(ctx context.Context, opts Options) error {
 	}
 	d.GPUEnabled = gpuEnabled(opts.GPU)
 	d.QwenEnabled = opts.Preload
+	d.FlashAttn = opts.FlashAttn
 
 	base := filepath.Join(opts.Home, ".stables", "tts")
 	if err := stage(base); err != nil {
@@ -132,7 +139,14 @@ func Install(ctx context.Context, opts Options) error {
 	}
 	tuiPath, err := installTUI(opts.Home, base)
 	if err != nil {
-		return err
+		// A running client holds its own binary open, and Linux will not replace a
+		// file while it is being executed ("text file busy"). Refusing the whole
+		// install over that would mean the backend could not be updated while the
+		// client is open, which is backwards: the backend is the part being changed.
+		fmt.Fprintf(os.Stderr,
+			"stables: tts: warning: could not replace the client (%v)\n"+
+				"  quit it (stables tts) and run `stables install tts` again to update it\n", err)
+		tuiPath = filepath.Join(base, "bin", tuiBinaryName)
 	}
 	// Point the client at the port this backend is actually published on, before
 	// anything is started, so a port other than the default still works.
@@ -181,6 +195,14 @@ func Install(ctx context.Context, opts Options) error {
 		return nil
 	}
 
+	// Take the port rather than refusing it. A previous install of this component is
+	// the likeliest thing holding it, and refusing to install over our own container
+	// means a rebuild cannot happen while the last version is running.
+	if took, err := takeOverPort(ctx, d, base); err != nil {
+		return err
+	} else if took {
+		fmt.Println("stables: tts: stopped the previous container to free the port")
+	}
 	if portInUse(d.ListenHost, d.Port) {
 		return fmt.Errorf(
 			"port %d is already in use on %s, so the container cannot publish there\n"+
@@ -390,6 +412,39 @@ func requireModels(d Data) error {
 			"  fetch them with: stables install tts   (without --no-models)", d.ModelsDir)
 	}
 	return nil
+}
+
+// takeOverPort frees the port from a previous install of this component, and reports
+// whether it had to.
+//
+// Two shapes, because the container can outlive the directory that describes it: the
+// compose project in *base*, and a container carrying this component's own name. The
+// second is removed directly, since compose in this directory knows nothing about a
+// container some other compose file created — an install made from a different home,
+// which is exactly how two stacks come to fight over one port.
+//
+// Only this component's own container is ever removed, never a container that merely
+// happens to hold the port.
+func takeOverPort(ctx context.Context, d Data, base string) (bool, error) {
+	container := d.Name + "-tts"
+	if !containerRunning(ctx, container) {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(base, "docker-compose.yml")); err == nil {
+		if err := composeRun(ctx, base, "down"); err == nil {
+			return true, nil
+		}
+	}
+	cmd := exec.CommandContext(ctx, "docker", "rm", "-f", container)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	return true, cmd.Run()
+}
+
+// containerRunning reports whether a container with exactly this name is up.
+func containerRunning(ctx context.Context, name string) bool {
+	out, err := exec.CommandContext(ctx, "docker", "ps",
+		"--filter", "name=^"+name+"$", "--format", "{{.Names}}").Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 // ensureDirs creates the directories the container mounts.

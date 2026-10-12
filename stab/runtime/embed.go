@@ -9,7 +9,7 @@ import (
 
 // TemplateVersion is bumped whenever the embedded default files change, so
 // existing projects are re-seeded with the new defaults.
-const TemplateVersion = 7
+const TemplateVersion = 8
 
 // TemplateVersionString returns the template version as a string.
 func TemplateVersionString() string { return strconv.Itoa(TemplateVersion) }

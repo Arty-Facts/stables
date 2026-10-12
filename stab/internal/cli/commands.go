@@ -21,6 +21,10 @@ func (a *App) cmdStartOrAttach(ctx context.Context, _ string) int {
 		fmt.Fprintln(a.ErrOut, "stab:", err)
 		return 1
 	}
+	// This is the only path that drops the user into the harness, so it is the
+	// only one that insists the harness exists: `stab bash` and `stab update`
+	// must keep working on a container whose harness is broken.
+	a.Projects.RequireHarness = true
 	res, err := a.Projects.StartOrAttach(ctx, root, id)
 	if err != nil {
 		fmt.Fprintln(a.ErrOut, "stab:", redact.Redact(err.Error()))

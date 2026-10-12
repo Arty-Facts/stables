@@ -220,7 +220,15 @@ impl AppState {
             // which made the tabs decorative: the Swedish tab listed the same
             // English voices as every other tab, so a Swedish voice could not be
             // found by looking under Swedish.
-            Some(lang) => self.voices.iter().filter(|v| v.lang == lang).collect(),
+            Some(lang) => self
+                .voices
+                .iter()
+                // `auto` means the voice fits any language — a clone's language comes
+                // from its reference audio, not from its filename. Comparing exactly
+                // meant a bare `arty.mp3` vanished the moment a language tab was
+                // chosen, which is how a voice goes missing without being deleted.
+                .filter(|v| v.lang == lang || v.lang == "auto")
+                .collect(),
             None => self.voices.iter().collect(),
         }
     }

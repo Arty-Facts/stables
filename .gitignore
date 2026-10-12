@@ -48,3 +48,8 @@ __pycache__/
 # installs its own dependencies; nothing here is committed.
 /agent_venv/
 /tts/backend/venv/
+
+# Pi agent scratch produced by working in this repository (ask-model run dumps,
+# tool output). Runtime state, never part of a release: `git add -A` used to be
+# able to sweep it into a release commit.
+/.pi/

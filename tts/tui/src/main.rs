@@ -658,7 +658,11 @@ async fn start_generation(
                 .unwrap_or(voice.clone());
             (v, Some(lang_mode.clone()))
         } else {
-            ("auto".to_string(), None::<String>)
+            // Auto language mode: send the voice that was chosen and let the server
+            // derive the language from it. This sent "auto" as the voice instead,
+            // which the server resolves to the language default — so every selection
+            // came back as af_heart and no cloned voice could be spoken at all.
+            (voice.clone(), None::<String>)
         };
 
         tokio::spawn(async move {

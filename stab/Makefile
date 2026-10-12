@@ -1,6 +1,11 @@
 GO ?= go
 GOTOOLCHAIN ?= local
 BIN ?= stab
+# Static by default: this binary is baked into `stables` and scp'd to remote
+# hosts by `stables remote install`, where the target's glibc is unknown. The
+# SQLite driver is modernc.org/sqlite (pure Go), so cgo buys nothing.
+CGO_ENABLED ?= 0
+export CGO_ENABLED
 
 # The top-level build injects these (base64) so the deployable binary carries
 # its models.json and secrets.env without the repo ever referencing them.

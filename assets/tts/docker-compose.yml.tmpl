@@ -24,6 +24,9 @@ services:
         # Adds the cloning engine to the image. Set by --preload, since there is
         # no point fetching weights for an engine that is not installed.
         WITH_QWEN: "{{ if .QwenEnabled }}1{{ else }}0{{ end }}"
+        # Faster attention for the cloning engine, from a prebuilt wheel. Set by
+        # --flash-attn; GPU-only, since flash-attn has no CPU build.
+        WITH_FLASH_ATTN: "{{ if .FlashAttn }}1{{ else }}0{{ end }}"
     container_name: {{ .Name }}-tts
     restart: unless-stopped
     ports:

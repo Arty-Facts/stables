@@ -76,6 +76,12 @@ type Controller struct {
 	// PiAgentDir returns the host global Pi agent directory (~/.pi/agent) whose
 	// extensions and skills are mounted into the container. Wired by the CLI.
 	PiAgentDir func() string
+	// RequireHarness makes StartOrAttach verify that the configured harness can
+	// actually start inside the container, failing instead of attaching to a
+	// session whose main window never existed. Set only on the path that drops
+	// the user into the harness (`stab .`): `stab bash` must keep working on a
+	// container whose harness is broken, otherwise there is no way in.
+	RequireHarness bool
 }
 
 // StartResult describes an attached or started deployment.
@@ -192,6 +198,14 @@ func (c *Controller) StartOrAttach(ctx context.Context, root, projectID string) 
 	}
 	if err := c.probeAgentDir(ctx, res.ContainerName); err != nil {
 		return res, err
+	}
+	// Probe the harness before the npm prewarm: a container that cannot run the
+	// harness should fail in seconds, not after minutes of package installs and
+	// the creation of a session nobody can use.
+	if c.RequireHarness {
+		if err := c.probeHarness(ctx, res.ContainerName, name); err != nil {
+			return res, err
+		}
 	}
 	if err := c.prewarmPiNPM(ctx, res.ContainerName); err != nil {
 		return res, err
@@ -467,6 +481,74 @@ func probeDetails(out string, err error) string {
 	return out
 }
 
+// probeHarness verifies that the configured harness can start inside the
+// container, from the same working directory the tmux window uses and in a
+// login shell (which is also the stricter case: it must find Pi through the
+// profile.d PATH entry, not only through the inherited environment).
+//
+// Without this, a harness that is missing or unrunnable is invisible: tmux
+// deletes the window as soon as its command exits and `tmux new-session` still
+// exits 0, so the user lands in a session with no main window and no error.
+func (c *Controller) probeHarness(ctx context.Context, container, name string) error {
+	harness := tmux.HarnessCommand(c.Config.HarnessCommand)
+	bin := tmux.HarnessBinary(c.Config.HarnessCommand)
+	if bin == "" {
+		return fmt.Errorf("harness command is empty; set one with `stab settings`")
+	}
+	project := ContainerProjectDir(name)
+	// A bare name must resolve on PATH; anything else must be an executable
+	// path relative to the project dir (the window's cwd). `command -v` covers
+	// builtins and functions too, which is the same resolution the window uses.
+	script := fmt.Sprintf("cd %s 2>/dev/null || true; command -v %s >/dev/null 2>&1 || [ -x %s ]",
+		shellQuote(project), shellQuote(bin), shellQuote(bin))
+	out, err := c.Docker.ExecAs(ctx, container, ContainerUser, "bash", "-lc", script)
+	if err == nil {
+		return nil
+	}
+	// The docker error repeats the whole probe command line, which is noise here
+	// (the command is already named in the message). Only the container's own
+	// output — "pi: command not found" — is worth showing.
+	detail := ""
+	if strings.TrimSpace(out) != "" {
+		detail = ": " + strings.TrimSpace(out)
+	}
+	return fmt.Errorf("harness %q is not available inside %s (probed %q in %s)%s. "+
+		"A runtime image built before the current template has no harness on PATH: run `stab update`, or `stab kill` and then `stab .`, to rebuild it. "+
+		"Otherwise choose another harness with `stab settings`",
+		harness, container, bin, project, detail)
+}
+
+// ensureHarnessWindow repairs a session whose main window is gone. tmux deletes
+// a window when its command exits, so containers created while the harness was
+// missing keep a session without the harness forever: ensureTmuxSession used to
+// return as soon as `has-session` succeeded. Recreating the window here heals
+// those deployments on the next `stab .` without touching the container
+// (recreating an attached container would close the user's terminal).
+func (c *Controller) ensureHarnessWindow(ctx context.Context, container string, main tmux.WindowCommand) error {
+	out, err := c.Docker.ExecAs(ctx, container, ContainerUser, tmux.ListWindows(tmux.SessionName)...)
+	if err == nil && windowListHas(out, main.Name) {
+		return nil
+	}
+	_, err = c.Docker.ExecAs(ctx, container, ContainerUser, tmux.NewWindow(tmux.SessionName, main)...)
+	return err
+}
+
+// windowListHas reports whether tmux's one-name-per-line window listing
+// contains the given window.
+func windowListHas(list, window string) bool {
+	for _, line := range strings.Split(list, "\n") {
+		if strings.TrimSpace(line) == window {
+			return true
+		}
+	}
+	return false
+}
+
+// shellQuote single-quotes a value for the container's shell.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // prewarmPiNPM installs shared Pi npm package dependencies before the harness
 // starts. Stables deploys package metadata/settings but skips node_modules for
 // portability, so the first `pi` run otherwise spends minutes doing npm work in
@@ -492,19 +574,25 @@ func (c *Controller) prewarmPiNPM(ctx context.Context, container string) error {
 
 // ensureTmuxSession creates the tmux session inside the container (as the
 // container user) if it does not already exist, loading the project's tmux.conf
-// from its in-project .stables dir. It retries briefly while the container is
+// from its in-project .stables dir. An existing session has its main window
+// repaired when tmux deleted it. It retries briefly while the container is
 // still starting.
 func (c *Controller) ensureTmuxSession(ctx context.Context, container, name string) error {
 	containerProject := ContainerProjectDir(name)
 	configFile := ContainerConfigDir(name) + "/tmux.conf"
+	windows := tmux.DefaultLayout(c.Config.HarnessCommand, ContainerConfigDir(name))
 	var lastErr error
 	for attempt := 0; attempt < 10; attempt++ {
 		if _, err := c.Docker.ExecAs(ctx, container, ContainerUser, tmux.HasSession(tmux.SessionName)...); err == nil {
-			return nil
-		}
-		_, lastErr = c.Docker.ExecAs(ctx, container, ContainerUser, tmux.NewSessionConfig(tmux.SessionName, tmux.DefaultLayout(c.Config.HarnessCommand, ContainerConfigDir(name)), containerProject, configFile)...)
-		if lastErr == nil {
-			return nil
+			if err := c.ensureHarnessWindow(ctx, container, windows[0]); err == nil {
+				return nil
+			}
+			lastErr = err
+		} else {
+			_, lastErr = c.Docker.ExecAs(ctx, container, ContainerUser, tmux.NewSessionConfig(tmux.SessionName, windows, containerProject, configFile)...)
+			if lastErr == nil {
+				return nil
+			}
 		}
 		select {
 		case <-ctx.Done():

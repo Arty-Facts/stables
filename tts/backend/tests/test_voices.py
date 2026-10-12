@@ -68,16 +68,20 @@ def test_missing_directory_is_not_an_error(tmp_path, monkeypatch):
     assert voices.list_cloned() == []
 
 
-def test_list_cloned_finds_wavs_only(voices_dir):
-    _add_voice(voices_dir, "morgan")
-    _add_voice(voices_dir, "ada", transcript="hello")
-    (voices_dir / "notes.txt").write_text("not a voice")
-    (voices_dir / "sample.mp3").write_bytes(b"\x00")
+def test_list_cloned_ignores_files_that_are_not_audio(voices_dir):
+    """A transcript or a note beside the voices is not a voice.
 
-    found = {v.id for v in voices.list_cloned()}
-    assert found == {"morgan", "ada"}
+    The other half of the rule: audio formats the backend decodes become voices
+    (see the compressed-reference test), and everything else is left alone, so a
+    directory full of transcripts does not turn into voices.
+    """
+    (voices_dir / "morgan.wav").write_bytes(b"x")
+    (voices_dir / "morgan.txt").write_text("the reference transcript")
+    (voices_dir / "notes.md").write_text("scratch notes")
+    (voices_dir / "config.json").write_text("{}")
 
-
+    found = {v.id for v in voices.list_cloned(base=voices_dir)}
+    assert found == {"morgan"}, found
 def test_cloned_voice_reports_its_engine(voices_dir):
     _add_voice(voices_dir, "morgan")
     voice = voices.list_cloned()[0]
@@ -231,4 +235,21 @@ def test_a_flac_reference_is_found_too(tmp_path):
     (tmp_path / "narrator.en.flac").write_bytes(b"x")
     audio, text = voices.reference("narrator.en", base=tmp_path)
     assert audio.suffix == ".flac"
+    assert text == ""
+
+
+def test_a_compressed_reference_is_found_too(tmp_path):
+    """libsndfile decodes flac and mp3 itself, so a voice needs no transcoding.
+
+    The user's rule is `name.language.extension`; a format the backend can decode is
+    a voice, and asking them to convert one it already reads is friction for nothing.
+    """
+    for name in ("narrator.en.flac", "arty.en.mp3"):
+        (tmp_path / name).write_bytes(b"x")
+    by_id = {v.id: v for v in voices.list_cloned(base=tmp_path)}
+    assert set(by_id) == {"narrator.en", "arty.en"}
+    assert by_id["arty.en"].lang == "en"
+
+    audio, text = voices.reference("arty.en", base=tmp_path)
+    assert audio.suffix == ".mp3"
     assert text == ""

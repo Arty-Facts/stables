@@ -38,7 +38,7 @@ Prefer not to build? Download a prebuilt binary and install it:
 ```sh
 curl -L "https://drive.google.com/uc?export=download&id=13qJFUfLAvylxhuSJpqs4c9Oo_TbDA36P" -o stables \
   && chmod +x stables \
-  && ./stables install
+  && ./stables install stab
 ```
 
 Or build from source:

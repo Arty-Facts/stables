@@ -12,6 +12,7 @@ import (
 	"github.com/stables/stab/internal/config"
 	"github.com/stables/stab/internal/docker"
 	"github.com/stables/stab/internal/store"
+	"github.com/stables/stab/internal/tmux"
 )
 
 // fakeDocker records lifecycle calls and simulates a tmux session inside a
@@ -31,6 +32,8 @@ type fakeDocker struct {
 	probeFailures   int
 	npmNeedsInstall bool
 	npmInstallFails bool
+	harnessMissing  bool
+	missingMain     bool
 }
 
 func newFakeDocker() *fakeDocker {
@@ -110,6 +113,24 @@ func (f *fakeDocker) ExecAs(_ context.Context, container, user string, args ...s
 			return "", nil
 		}
 		return "", exec.ErrNotFound
+	}
+	// Simulate the harness probe (`bash -lc` running `command -v <harness>`).
+	if len(args) >= 3 && args[0] == "bash" && strings.Contains(args[2], "command -v") {
+		if f.harnessMissing {
+			return "", exec.ErrNotFound
+		}
+		return "/usr/local/bin/pi", nil
+	}
+	// Simulate tmux list-windows: a container whose harness window tmux deleted.
+	if len(args) >= 2 && args[0] == "tmux" && args[1] == "list-windows" {
+		if f.missingMain {
+			return "shell\nlogs\nhelp\n", nil
+		}
+		return "main\nshell\nlogs\nhelp\n", nil
+	}
+	if len(args) >= 2 && args[0] == "tmux" && args[1] == "new-window" {
+		f.missingMain = false
+		return "", nil
 	}
 	// Simulate tmux has-session / new-session.
 	if len(args) >= 2 && args[0] == "tmux" && args[1] == "has-session" {
@@ -264,11 +285,105 @@ func TestStartOrAttachCreatesHarnessWindow(t *testing.T) {
 		t.Fatal("no tmux new-session executed")
 	}
 	joined := strings.Join(newSession, " ")
-	if !strings.Contains(joined, "-n main pi") {
-		t.Errorf("expected harness window running pi: %q", joined)
+	// The harness runs through the failure guard, so a harness that cannot
+	// start leaves a visible message and a shell instead of deleting the window.
+	if !strings.Contains(joined, "-n main "+tmux.HarnessWindowCommand("pi")) {
+		t.Errorf("expected guarded harness window: %q", joined)
+	}
+	if !strings.Contains(joined, "exec bash -l") {
+		t.Errorf("harness window must fall back to a shell: %q", joined)
 	}
 	if !strings.Contains(joined, "-n shell") {
 		t.Errorf("expected shell window: %q", joined)
+	}
+}
+
+func TestStartOrAttachFailsWhenHarnessMissing(t *testing.T) {
+	c, dc, _, root := testController(t)
+	c.RequireHarness = true
+	dc.harnessMissing = true
+	id, _ := IDForPath(root)
+
+	_, err := c.StartOrAttach(context.Background(), root, id)
+	if err == nil {
+		t.Fatal("expected an error when the harness is missing")
+	}
+	if !strings.Contains(err.Error(), "not available inside") {
+		t.Errorf("error should name the missing harness: %v", err)
+	}
+	if !strings.Contains(err.Error(), "stab update") {
+		t.Errorf("error should state the remedy: %v", err)
+	}
+	// The probe must run before the npm prewarm and before any tmux session is
+	// created, so a doomed deployment fails fast and leaves nothing behind.
+	for _, args := range dc.execArgs {
+		if strings.Contains(strings.Join(args, " "), "npm install") {
+			t.Errorf("npm prewarm ran before the harness probe: %v", args)
+		}
+		if isTmuxExec(args, "new-session") || isTmuxExec(args, "new-window") {
+			t.Errorf("tmux window created despite the missing harness: %v", args)
+		}
+	}
+}
+
+// isTmuxExec reports whether a recorded docker-exec argv invokes the given tmux
+// subcommand. Recorded argv starts with the container and user names, so the
+// subcommand is not at a fixed index.
+func isTmuxExec(args []string, sub string) bool {
+	for i, a := range args {
+		if a == "tmux" && i+1 < len(args) && args[i+1] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+func TestStartOrAttachSkipsHarnessProbeUnlessRequired(t *testing.T) {
+	c, dc, _, root := testController(t)
+	dc.harnessMissing = true
+	id, _ := IDForPath(root)
+
+	// `stab bash` and `stab update` go through the same reconciliation; they must
+	// keep working on a container whose harness is broken, so they never probe.
+	if _, err := c.StartOrAttach(context.Background(), root, id); err != nil {
+		t.Fatalf("harness probe must not run when it is not required: %v", err)
+	}
+	for _, args := range dc.execArgs {
+		if strings.Contains(strings.Join(args, " "), "command -v") {
+			t.Errorf("unexpected harness probe: %v", args)
+		}
+	}
+}
+
+func TestStartOrAttachRepairsMissingHarnessWindow(t *testing.T) {
+	c, dc, _, root := testController(t)
+	id, _ := IDForPath(root)
+	if _, err := c.StartOrAttach(context.Background(), root, id); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate what the old runtime did: the harness was missing, so tmux deleted
+	// the main window and the session outlived it.
+	dc.missingMain = true
+	if _, err := c.StartOrAttach(context.Background(), root, id); err != nil {
+		t.Fatal(err)
+	}
+
+	var repaired []string
+	for _, args := range dc.execArgs {
+		if isTmuxExec(args, "new-window") {
+			repaired = args
+		}
+	}
+	if repaired == nil {
+		t.Fatal("missing main window was not recreated")
+	}
+	joined := strings.Join(repaired, " ")
+	if !strings.Contains(joined, "-n main "+tmux.HarnessWindowCommand("pi")) {
+		t.Errorf("repaired window must run the guarded harness: %q", joined)
+	}
+	if dc.missingMain {
+		t.Error("fake still reports the window as missing")
 	}
 }
 

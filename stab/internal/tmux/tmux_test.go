@@ -11,14 +11,68 @@ func TestNewSessionLayout(t *testing.T) {
 	if !strings.Contains(joined, "new-session -d -s stab") {
 		t.Errorf("session creation missing: %q", joined)
 	}
-	if !strings.Contains(joined, "-n main pi") {
-		t.Errorf("expected main window running the harness: %q", joined)
+	// The main window runs the harness through the failure guard, so a harness
+	// that cannot start reports itself instead of deleting the window.
+	if !strings.Contains(joined, "-n main "+HarnessWindowCommand("pi")) {
+		t.Errorf("expected main window running the guarded harness: %q", joined)
 	}
 	if !strings.Contains(joined, "-n shell") || !strings.Contains(joined, "-n logs") || !strings.Contains(joined, "-n help") {
 		t.Errorf("expected shell, logs, and help windows: %q", joined)
 	}
 	if !strings.Contains(joined, "-c /workspace") {
 		t.Errorf("workdir missing: %q", joined)
+	}
+}
+
+func TestHarnessWindowCommandKeepsWindowOnFailure(t *testing.T) {
+	cmd := HarnessWindowCommand("pi")
+	for _, want := range []string{
+		"pi;",                  // runs the harness
+		"__stab_harness_rc=$?", // captures its status before anything else
+		`[ "$__stab_harness_rc" -ne 0 ]`,
+		"[stab] harness failed",
+		"exec bash -l", // the window stays alive with a shell
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("harness guard missing %q in %q", want, cmd)
+		}
+	}
+	if strings.HasPrefix(cmd, "pi ||") {
+		t.Errorf("guard must not depend on `||` alone: %q", cmd)
+	}
+}
+
+func TestHarnessCommandDefaultsToPi(t *testing.T) {
+	if HarnessCommand("") != "pi" {
+		t.Errorf("empty harness should default to pi, got %q", HarnessCommand(""))
+	}
+	if HarnessCommand("myagent") != "myagent" {
+		t.Errorf("configured harness must be preserved")
+	}
+	// The window and any probe must agree on what runs.
+	if !strings.HasPrefix(HarnessWindowCommand(""), "pi;") {
+		t.Errorf("defaulted window command should run pi: %q", HarnessWindowCommand(""))
+	}
+}
+
+func TestHarnessBinary(t *testing.T) {
+	tests := map[string]string{
+		"":                 "pi",
+		"pi":               "pi",
+		"pi --resume":      "pi",
+		"./run.sh --watch": "./run.sh",
+	}
+	for in, want := range tests {
+		if got := HarnessBinary(in); got != want {
+			t.Errorf("HarnessBinary(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestListWindows(t *testing.T) {
+	argv := ListWindows("stab")
+	if strings.Join(argv, " ") != `tmux list-windows -t stab -F #{window_name}` {
+		t.Errorf("unexpected list-windows: %v", argv)
 	}
 }
 

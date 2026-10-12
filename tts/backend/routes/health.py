@@ -5,6 +5,7 @@ models are still cold. It reports which engines *could* run rather than claiming
 a specific one is active, because a request picks the engine per voice.
 """
 
+import importlib.util
 from fastapi import APIRouter
 
 from .. import device
@@ -22,6 +23,9 @@ def router(registry: Registry) -> APIRouter:
             "model_loaded": bool(available),
             "engine": available[0] if available else "none",
             "engines": available,
+            # Whether the cloning engine would use flash-attention. Reported as
+            # importable rather than in use: on a CPU host it is installed and idle.
+            "flash_attn": importlib.util.find_spec("flash_attn") is not None,
             # Whether this is really running on a GPU, so a client can say so
             # instead of leaving a CPU fallback invisible.
             **device.report(),

@@ -152,3 +152,18 @@ func TestTTSUsageIsNotPassedToTheTui(t *testing.T) {
 		}
 	}
 }
+
+func TestReinstallFlagsAreForwardedToInstall(t *testing.T) {
+	// `reinstall tts --preload` used to install with the defaults: the flags were
+	// dropped between remove and install, so the build ran with WITH_QWEN=0 and the
+	// cloning engine never arrived — while telling the user the install was complete.
+	got := installFlags([]string{"tts", "--preload", "--gpu", "cpu", "--port", "17494", "--force"})
+	want := "--preload --gpu cpu --port 17494 --force"
+	if joined := strings.Join(got, " "); joined != want {
+		t.Errorf("installFlags = %q, want %q", joined, want)
+	}
+	// A component name is not a flag, and a flag's value must not be mistaken for one.
+	if got := installFlags([]string{"tts"}); len(got) != 0 {
+		t.Errorf("a component name must not be forwarded as a flag: %v", got)
+	}
+}

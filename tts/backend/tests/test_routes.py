@@ -53,6 +53,15 @@ class UnavailableEngine(StubEngine):
         return False
 
 
+class StubCloneEngine(StubEngine):
+    """A clone engine that is available, so a cloned voice can be spoken in a test."""
+
+    name = "qwen"
+
+    def voices(self) -> list[Voice]:
+        return [Voice(id="arty.en", name="Arty", lang="en", engine="qwen", cloned=True)]
+
+
 def _client(*engines) -> TestClient:
     return TestClient(create_app(Registry(list(engines) or [StubEngine()])))
 
@@ -239,3 +248,46 @@ def test_capabilities_reports_engines_and_voices_dir():
     body = _client().get("/v1/capabilities").json()
     assert body["engines"][0]["name"] == "stub"
     assert "voices_dir" in body
+
+
+def test_the_wav_endpoint_returns_a_playable_file():
+    """curl the text and a voice, get a WAV — what the backend is debugged with."""
+    engine = StubEngine()
+    resp = _client(engine).get(
+        "/v1/tts.wav", params={"text": "hello there", "voice": "stub_voice"}
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/wav"
+    assert resp.content[:4] == b"RIFF"
+    assert resp.content[8:12] == b"WAVE"
+    # Named, so `curl -OJ` writes arty.wav rather than tts.wav.
+    assert resp.headers["content-disposition"] == 'attachment; filename="stub_voice.wav"'
+    # The same path as the JSON endpoint: the text and the voice reach the engine.
+    assert engine.calls[-1][0] == "hello there"
+    assert engine.calls[-1][1] == "stub_voice"
+
+
+def test_the_wav_endpoint_reports_the_engine_and_rate():
+    resp = _client().get("/v1/tts.wav", params={"text": "hi", "voice": "stub_voice"})
+    assert resp.headers["x-engine"] == "stub"
+    assert resp.headers["x-sample-rate"] == "24000"
+    assert resp.headers["x-voice"] == "stub_voice"
+
+
+def test_the_wav_endpoint_rejects_an_unknown_voice():
+    resp = _client().get("/v1/tts.wav", params={"text": "hi", "voice": "nobody"})
+    assert resp.status_code == 404
+
+
+# The friendly-name lookup (`voice=Arty` → `arty.en`) is not covered: the registry does
+# not select a stub clone engine for a cloned id in this harness, so the test proved
+# nothing about the lookup and was removed rather than left passing for the wrong reason.
+# The id form is covered above, and the lookup is exercised by hand:
+#   curl -o a.wav 'localhost:17493/v1/tts.wav?voice=arty.en&text=hello'
+
+
+def test_health_reports_whether_flash_attn_is_available():
+    """The flag is only observable if /health says so. False here: the test venv has no
+    flash-attn, which is exactly the state a plain install ships in."""
+    body = _client().get("/health").json()
+    assert body["flash_attn"] is False
